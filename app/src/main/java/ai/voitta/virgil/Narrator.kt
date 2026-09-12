@@ -31,12 +31,27 @@ class NarrationFailed(
     val attempts: List<VendorAttempt> = emptyList(),
 ) : Exception(message)
 
-private const val MAX_TOKENS = 2000
+private const val MAX_TOKENS = 4000
 private const val MAX_WEB_RESULTS = 3
 private const val REQUEST_TIMEOUT_MS = 120_000
 
 /** How much of each article intro is worth sending. */
 private const val INTRO_BUDGET = 600
+
+private const val WEB_SEARCH_CLAUSE = """
+When the retrieved articles are all far away, reach for the web instead. Try the
+street name, the subdivision or neighbourhood name, what the land was before it
+was built on, who it was named for, the township, the county historical society.
+Ordinary places have histories. They are simply not in Wikipedia.
+"""
+
+private const val NO_WEB_SEARCH_CLAUSE = """
+You have no web access on this request. Everything you know about this place is
+either in the material below or already in your memory, and your memory of one
+specific residential street is almost certainly nothing at all. Do not reason
+your way to a plausible-sounding history. If the retrieved articles are all far
+away and you have nothing solid, say exactly that.
+"""
 
 private const val SYSTEM_PROMPT = """
 You are Virgil, a guide. Someone is standing at a specific point and wants to
@@ -55,11 +70,6 @@ governs how you may use them:
 - 200 m to 1 km: nearby. Usable, but say how far away it is.
 - Over 1 km: a different place. Do not present it as where they are. At most it
   is context, and usually it is not worth mentioning at all.
-
-When the retrieved articles are all far away, reach for the web instead. Try the
-street name, the subdivision or neighbourhood name, what the land was before it
-was built on, who it was named for, the township, the county historical society.
-Ordinary places have histories. They are simply not in Wikipedia.
 
 Hedge explicitly when you are inferring rather than sourcing. "I am not certain,
 but" is better than false confidence.
@@ -110,8 +120,9 @@ suspend fun narrate(context: Context, retrieval: Retrieval): Blurb {
                 if (park > 0) {
                     VendorParking.park(context, vendor.name, park)
                 }
+                val parked = if (park > 0) ", parked ${park}s" else ""
                 attempts.add(
-                    VendorAttempt(vendor.name, "HTTP ${e.status}${if (park > 0) ", parked ${park}s" else ""}")
+                    VendorAttempt(vendor.name, "HTTP ${e.status}$parked: ${reason(e.body)}")
                 )
             } catch (e: Exception) {
                 attempts.add(VendorAttempt(vendor.name, e.message ?: "failed"))
@@ -134,8 +145,13 @@ private fun callVendor(
     body.put("model", vendor.model)
     body.put("max_tokens", MAX_TOKENS)
 
+    // A rung without web search must not be told to search: that instruction
+    // is an invitation to invent, which is the one unrecoverable failure.
+    val searchClause = if (vendor.webSearch) WEB_SEARCH_CLAUSE else NO_WEB_SEARCH_CLAUSE
+    val system = SYSTEM_PROMPT.trim() + "\n\n" + searchClause.trim()
+
     val messages = JSONArray()
-    messages.put(JSONObject().put("role", "system").put("content", SYSTEM_PROMPT.trim()))
+    messages.put(JSONObject().put("role", "system").put("content", system))
     messages.put(JSONObject().put("role", "user").put("content", describe(retrieval)))
     body.put("messages", messages)
 
@@ -145,8 +161,10 @@ private fun callVendor(
         body.put("plugins", plugins)
     }
     // Ask the vendor to price the call rather than hardcoding a rate card that
-    // goes stale and differs per rung.
-    body.put("usage", JSONObject().put("include", true))
+    // goes stale and differs per rung -- but only where the field exists.
+    if (vendor.costReporting) {
+        body.put("usage", JSONObject().put("include", true))
+    }
 
     val url = URL("${vendor.baseUrl}/chat/completions")
     val response = postJson(url, apiKey, body.toString(), REQUEST_TIMEOUT_MS)
@@ -181,6 +199,29 @@ private fun callVendor(
         costUsd = cost,
         attempts = attempts.toList(),
     )
+    return retval
+}
+
+/**
+ * The useful sentence out of an error body. Without this the walk records a
+ * bare status, which is exactly as much as you already knew.
+ */
+private fun reason(body: String): String {
+    val trimmed = body.trim()
+    if (trimmed.isEmpty()) {
+        return "no body"
+    }
+    val retval = try {
+        val root = if (trimmed.startsWith("[")) {
+            org.json.JSONArray(trimmed).optJSONObject(0)
+        } else {
+            JSONObject(trimmed)
+        }
+        val message = root?.optJSONObject("error")?.optString("message", "")
+        if (message.isNullOrBlank()) trimmed.take(160) else message.take(160)
+    } catch (e: Exception) {
+        trimmed.take(160)
+    }
     return retval
 }
 

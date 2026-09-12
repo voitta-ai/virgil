@@ -21,6 +21,16 @@ data class Vendor(
      * the evaluation log for exactly that reason.
      */
     val webSearch: Boolean,
+    /**
+     * Whether this rung understands `usage: {include: true}` and prices the
+     * call back.
+     *
+     * "OpenAI-compatible" is not uniform. That field is an OpenRouter
+     * extension, and Gemini's endpoint rejects the whole request over it
+     * ("Unknown name \"usage\": Cannot find field") rather than ignoring it.
+     * Vendor-specific extras belong on the vendor, never in the shared body.
+     */
+    val costReporting: Boolean = false,
 )
 
 /**
@@ -39,6 +49,17 @@ val PROVIDER_CATALOG = listOf(
         baseUrl = "https://openrouter.ai/api/v1",
         model = "anthropic/claude-opus-5",
         webSearch = true,
+        costReporting = true,
+    ),
+    Vendor(
+        // Google's OpenAI-compatible endpoint. Verified live. Note webSearch is
+        // false: that layer accepts only OpenAI-shaped tools, so Gemini's
+        // google_search grounding is rejected there ("Unknown name
+        // \"google_search\" at 'tools[0]'"). Fine for text, cannot carry Tier 1.
+        name = "gemini",
+        baseUrl = "https://generativelanguage.googleapis.com/v1beta/openai",
+        model = "gemini-3.8-flash",
+        webSearch = false,
     ),
     Vendor(
         name = "groq",
