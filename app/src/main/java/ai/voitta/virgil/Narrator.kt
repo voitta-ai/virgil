@@ -1,37 +1,39 @@
 package ai.voitta.virgil
 
-import com.anthropic.client.okhttp.AnthropicOkHttpClient
-import com.anthropic.models.messages.MessageCreateParams
-import com.anthropic.models.messages.OutputConfig
-import com.anthropic.models.messages.UserLocation
-import com.anthropic.models.messages.WebSearchTool20260209
+import android.content.Context
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.util.TimeZone
+import org.json.JSONArray
+import org.json.JSONObject
+import java.net.URL
 import kotlin.math.roundToInt
 
-/** What Virgil has to say, plus what it cost to say it. */
+/** What Virgil has to say, which rung said it, and what it cost. */
 data class Blurb(
     val text: String,
+    val vendor: String,
+    val model: String,
+    /** False means this run did not have web search at all. See [Vendor.webSearch]. */
+    val webSearchAvailable: Boolean,
     val inputTokens: Long,
     val outputTokens: Long,
-    val webSearches: Long,
-    val costUsd: Double,
+    /** Reported by the vendor when it can; null when it does not say. */
+    val costUsd: Double?,
+    val attempts: List<VendorAttempt>,
 )
 
-class NarrationFailed(message: String) : Exception(message)
+/** One rung's outcome, so a quiet walk down the chain is visible afterwards. */
+data class VendorAttempt(val vendor: String, val outcome: String)
 
-const val NARRATION_MODEL = "claude-opus-5"
-const val NARRATION_EFFORT = "low"
+class NarrationFailed(
+    message: String,
+    /** The walk that led here. Carried on the failure so the log keeps it. */
+    val attempts: List<VendorAttempt> = emptyList(),
+) : Exception(message)
 
-// claude-opus-5 list price. Web search is billed separately per search at a rate
-// not folded in here; the evaluation log records the search count instead so the
-// real figure can be reconstructed.
-private const val INPUT_USD_PER_TOKEN = 5.0 / 1_000_000
-private const val OUTPUT_USD_PER_TOKEN = 25.0 / 1_000_000
-
-private const val MAX_TOKENS = 2000L
-private const val MAX_WEB_SEARCHES = 3L
+private const val MAX_TOKENS = 2000
+private const val MAX_WEB_RESULTS = 3
+private const val REQUEST_TIMEOUT_MS = 120_000
 
 /** How much of each article intro is worth sending. */
 private const val INTRO_BUDGET = 600
@@ -54,7 +56,7 @@ governs how you may use them:
 - Over 1 km: a different place. Do not present it as where they are. At most it
   is context, and usually it is not worth mentioning at all.
 
-When the retrieved articles are all far away, search the web instead. Try the
+When the retrieved articles are all far away, reach for the web instead. Try the
 street name, the subdivision or neighbourhood name, what the land was before it
 was built on, who it was named for, the township, the county historical society.
 Ordinary places have histories. They are simply not in Wikipedia.
@@ -70,64 +72,115 @@ Do not read out citations. No headings, no bullet points, no markdown. Plain
 spoken prose only.
 """
 
-/** Turn what the structured sources found into something worth hearing. */
-suspend fun narrate(apiKey: String, retrieval: Retrieval): Blurb {
+/**
+ * Walk the waterfall until a rung answers.
+ *
+ * Call sites ask for narration, never for a vendor. Which rung served is
+ * reported back on [Blurb] rather than logged and forgotten, because the
+ * failure mode of a waterfall is that it works: a dead rung is experienced as
+ * the app being slow and flaky, not as an error.
+ */
+suspend fun narrate(context: Context, retrieval: Retrieval): Blurb {
     val retval = withContext(Dispatchers.IO) {
-        val client = AnthropicOkHttpClient.builder().apiKey(apiKey).build()
-
-        val search = WebSearchTool20260209.builder()
-            .maxUses(MAX_WEB_SEARCHES)
-            .userLocation(userLocation(retrieval.place))
-            .build()
-
-        val params = MessageCreateParams.builder()
-            .model(NARRATION_MODEL)
-            .maxTokens(MAX_TOKENS)
-            .outputConfig(OutputConfig.builder().effort(OutputConfig.Effort.LOW).build())
-            .system(SYSTEM_PROMPT.trim())
-            .addTool(search)
-            .addUserMessage(describe(retrieval))
-            .build()
-
-        val message = try {
-            client.messages().create(params)
-        } catch (e: Exception) {
-            throw NarrationFailed(e.message ?: "The narration call failed.")
+        val chain = Providers.enabled(context)
+        if (chain.isEmpty()) {
+            throw NarrationFailed("No providers chosen.")
         }
 
-        val text = message.content()
-            .mapNotNull { block -> block.text().orElse(null)?.text() }
-            .joinToString("\n")
-            .trim()
+        val attempts = mutableListOf<VendorAttempt>()
 
-        if (text.isEmpty()) {
-            val reason = message.stopReason().map { stop -> stop.toString() }.orElse("no text")
-            throw NarrationFailed("Virgil had nothing to say ($reason).")
+        for (vendor in chain) {
+            val apiKey = ApiKeyStore.get(context, vendor.name)
+            if (apiKey == null) {
+                attempts.add(VendorAttempt(vendor.name, "no key"))
+                continue
+            }
+            if (VendorParking.isParked(context, vendor.name)) {
+                attempts.add(VendorAttempt(vendor.name, "parked"))
+                continue
+            }
+
+            try {
+                val blurb = callVendor(vendor, apiKey, retrieval, attempts)
+                VendorParking.clear(context, vendor.name)
+                attempts.add(VendorAttempt(vendor.name, "served"))
+                return@withContext blurb.copy(attempts = attempts.toList())
+            } catch (e: HttpFailure) {
+                val park = parkSecondsFor(e.status, e.body)
+                if (park > 0) {
+                    VendorParking.park(context, vendor.name, park)
+                }
+                attempts.add(
+                    VendorAttempt(vendor.name, "HTTP ${e.status}${if (park > 0) ", parked ${park}s" else ""}")
+                )
+            } catch (e: Exception) {
+                attempts.add(VendorAttempt(vendor.name, e.message ?: "failed"))
+            }
         }
 
-        val usage = message.usage()
-        val searches = usage.serverToolUse().map { tools -> tools.webSearchRequests() }.orElse(0L)
-        val cost = usage.inputTokens() * INPUT_USD_PER_TOKEN +
-            usage.outputTokens() * OUTPUT_USD_PER_TOKEN
-
-        Blurb(
-            text = text,
-            inputTokens = usage.inputTokens(),
-            outputTokens = usage.outputTokens(),
-            webSearches = searches,
-            costUsd = cost,
-        )
+        val report = attempts.joinToString("; ") { attempt -> "${attempt.vendor}: ${attempt.outcome}" }
+        throw NarrationFailed("Every provider failed. $report", attempts.toList())
     }
     return retval
 }
 
-private fun userLocation(place: Place): UserLocation {
-    val builder = UserLocation.builder()
-    place.city?.let { city -> builder.city(city) }
-    place.state?.let { state -> builder.region(state) }
-    place.countryCode?.let { code -> builder.country(code.uppercase()) }
-    builder.timezone(TimeZone.getDefault().id)
-    val retval = builder.build()
+private fun callVendor(
+    vendor: Vendor,
+    apiKey: String,
+    retrieval: Retrieval,
+    attempts: MutableList<VendorAttempt>,
+): Blurb {
+    val body = JSONObject()
+    body.put("model", vendor.model)
+    body.put("max_tokens", MAX_TOKENS)
+
+    val messages = JSONArray()
+    messages.put(JSONObject().put("role", "system").put("content", SYSTEM_PROMPT.trim()))
+    messages.put(JSONObject().put("role", "user").put("content", describe(retrieval)))
+    body.put("messages", messages)
+
+    if (vendor.webSearch) {
+        val plugins = JSONArray()
+        plugins.put(JSONObject().put("id", "web").put("max_results", MAX_WEB_RESULTS))
+        body.put("plugins", plugins)
+    }
+    // Ask the vendor to price the call rather than hardcoding a rate card that
+    // goes stale and differs per rung.
+    body.put("usage", JSONObject().put("include", true))
+
+    val url = URL("${vendor.baseUrl}/chat/completions")
+    val response = postJson(url, apiKey, body.toString(), REQUEST_TIMEOUT_MS)
+
+    val root = JSONObject(response)
+    val message = root.optJSONArray("choices")
+        ?.optJSONObject(0)
+        ?.optJSONObject("message")
+    val text = message?.optString("content", "")?.trim() ?: ""
+
+    if (text.isEmpty()) {
+        val finish = root.optJSONArray("choices")
+            ?.optJSONObject(0)
+            ?.optString("finish_reason", "unknown") ?: "unknown"
+        throw NarrationFailed("Virgil had nothing to say (finish_reason: $finish).")
+    }
+
+    val usage = root.optJSONObject("usage")
+    val cost = if (usage != null && usage.has("cost") && !usage.isNull("cost")) {
+        usage.optDouble("cost")
+    } else {
+        null
+    }
+
+    val retval = Blurb(
+        text = text,
+        vendor = vendor.name,
+        model = vendor.model,
+        webSearchAvailable = vendor.webSearch,
+        inputTokens = usage?.optLong("prompt_tokens", 0L) ?: 0L,
+        outputTokens = usage?.optLong("completion_tokens", 0L) ?: 0L,
+        costUsd = cost,
+        attempts = attempts.toList(),
+    )
     return retval
 }
 

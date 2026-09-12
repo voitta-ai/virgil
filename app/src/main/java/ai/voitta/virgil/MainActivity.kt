@@ -28,6 +28,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -68,7 +69,9 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun VirgilScreen(viewModel: VirgilViewModel = viewModel()) {
     val state by viewModel.state.collectAsState()
-    val hasKey by viewModel.hasKey.collectAsState()
+    val missingKeys by viewModel.missingKeys.collectAsState()
+    val enabledProviders by viewModel.enabledProviders.collectAsState()
+    val warning by viewModel.warning.collectAsState()
     val logCount by viewModel.logCount.collectAsState()
     val context = LocalContext.current
 
@@ -84,7 +87,6 @@ private fun VirgilScreen(viewModel: VirgilViewModel = viewModel()) {
     }
 
     val busy = state is UiState.Locating ||
-        state is UiState.Resolving ||
         state is UiState.Retrieving ||
         state is UiState.Narrating
 
@@ -100,9 +102,29 @@ private fun VirgilScreen(viewModel: VirgilViewModel = viewModel()) {
 
         Spacer(Modifier.height(16.dp))
 
-        if (!hasKey) {
-            ApiKeyEntry(onSave = { value -> viewModel.saveApiKey(value) })
+        ProviderChooser(
+            enabled = enabledProviders,
+            onToggle = { name, on -> viewModel.setProviderEnabled(name, on) },
+        )
+        Spacer(Modifier.height(16.dp))
+
+        for (vendor in missingKeys) {
+            ApiKeyEntry(
+                vendor = vendor,
+                onSave = { value -> viewModel.saveApiKey(vendor.name, value) },
+            )
             Spacer(Modifier.height(16.dp))
+        }
+
+        val currentWarning = warning
+        if (currentWarning != null) {
+            Text(
+                currentWarning,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.height(12.dp))
         }
 
         Button(
@@ -125,9 +147,7 @@ private fun VirgilScreen(viewModel: VirgilViewModel = viewModel()) {
 
             is UiState.Locating -> Progress("Getting a fix...")
 
-            is UiState.Resolving -> Progress("Looking up the address...")
-
-            is UiState.Retrieving -> Progress("Looking for anything nearby...")
+            is UiState.Retrieving -> Progress("Looking up where that is...")
 
             is UiState.Narrating -> Progress("Working out what to tell you...")
 
@@ -155,20 +175,67 @@ private fun VirgilScreen(viewModel: VirgilViewModel = viewModel()) {
     }
 }
 
+/**
+ * The user picks the providers. Nothing is enabled by default and no key ships
+ * with the app -- the waterfall is whatever they turn on, tried in the order
+ * they turned it on.
+ */
 @Composable
-private fun ApiKeyEntry(onSave: (String) -> Unit) {
+private fun ProviderChooser(enabled: List<String>, onToggle: (String, Boolean) -> Unit) {
+    var expanded by remember { mutableStateOf(enabled.isEmpty()) }
+
+    val summary = if (enabled.isEmpty()) "none chosen" else enabled.joinToString(" -> ")
+    Text(
+        "Providers: $summary",
+        style = MaterialTheme.typography.labelLarge,
+        modifier = Modifier.clickable { expanded = !expanded },
+    )
+
+    if (!expanded) {
+        return
+    }
+
+    Spacer(Modifier.height(8.dp))
+    Text(
+        "Tried top to bottom, in the order you turn them on.",
+        style = MaterialTheme.typography.bodySmall,
+    )
+    Spacer(Modifier.height(4.dp))
+
+    for (vendor in PROVIDER_CATALOG) {
+        val on = enabled.contains(vendor.name)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Switch(checked = on, onCheckedChange = { checked -> onToggle(vendor.name, checked) })
+            Spacer(Modifier.height(0.dp))
+            Column(modifier = Modifier.padding(start = 12.dp)) {
+                Text(vendor.name, style = MaterialTheme.typography.bodyMedium)
+                val capability = if (vendor.webSearch) "web search" else "no web search"
+                Text(
+                    "${vendor.model}  -  $capability",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ApiKeyEntry(vendor: Vendor, onSave: (String) -> Unit) {
     var value by remember { mutableStateOf("") }
 
     Column(modifier = Modifier.fillMaxWidth()) {
         Text(
-            "Virgil calls the Anthropic API with your own key.",
+            "Virgil calls ${vendor.name} with your own key.",
             style = MaterialTheme.typography.bodyMedium,
         )
         Spacer(Modifier.height(8.dp))
         OutlinedTextField(
             value = value,
             onValueChange = { entered -> value = entered },
-            label = { Text("Anthropic API key") },
+            label = { Text("${vendor.name} API key") },
             singleLine = true,
             visualTransformation = PasswordVisualTransformation(),
             modifier = Modifier.fillMaxWidth(),
@@ -323,14 +390,14 @@ private fun exportLog(context: Context) {
 }
 
 private fun costLine(blurb: Blurb): String {
-    val retval = String.format(
-        Locale.US,
-        "%d in / %d out tokens, %d web searches, $%.4f",
-        blurb.inputTokens,
-        blurb.outputTokens,
-        blurb.webSearches,
-        blurb.costUsd,
-    )
+    val cost = if (blurb.costUsd != null) {
+        String.format(Locale.US, "$%.4f", blurb.costUsd)
+    } else {
+        "cost not reported"
+    }
+    val search = if (blurb.webSearchAvailable) "web search on" else "NO WEB SEARCH"
+    val retval = "${blurb.vendor} / ${blurb.model}  -  " +
+        "${blurb.inputTokens} in / ${blurb.outputTokens} out, $search, $cost"
     return retval
 }
 

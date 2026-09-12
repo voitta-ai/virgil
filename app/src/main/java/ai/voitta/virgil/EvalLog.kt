@@ -66,6 +66,9 @@ object EvalLog {
         blurb: Blurb?,
         blurbError: String?,
         latency: Latency,
+        // Taken separately rather than off the blurb: on total failure there is
+        // no blurb, and that is exactly when the walk is worth having.
+        attempts: List<VendorAttempt>,
     ): JSONObject {
         val fix = retrieval.fix
         val place = retrieval.place
@@ -111,18 +114,28 @@ object EvalLog {
             .minOrNull()
         entry.put("nearest_candidate_m", nearest?.roundToInt() ?: JSONObject.NULL)
 
-        entry.put("model", NARRATION_MODEL)
-        entry.put("effort", NARRATION_EFFORT)
+        entry.put("vendor", blurb?.vendor ?: JSONObject.NULL)
+        entry.put("model", blurb?.model ?: JSONObject.NULL)
+        // A run served by a rung without web search is measuring something
+        // different from one that had it. See the step 3 finding on issue #1.
+        entry.put("web_search_available", blurb?.webSearchAvailable ?: JSONObject.NULL)
+
+        // The whole walk, not just the winner: a waterfall's failure mode is
+        // that it quietly works while rungs above are dead.
+        val walk = JSONArray()
+        for (attempt in attempts) {
+            walk.put(JSONObject().put("vendor", attempt.vendor).put("outcome", attempt.outcome))
+        }
+        entry.put("vendor_attempts", walk)
         entry.put("blurb", blurb?.text ?: JSONObject.NULL)
         entry.put("blurb_error", blurbError ?: JSONObject.NULL)
 
         val usage = JSONObject()
         usage.put("input_tokens", blurb?.inputTokens ?: JSONObject.NULL)
         usage.put("output_tokens", blurb?.outputTokens ?: JSONObject.NULL)
-        usage.put("web_searches", blurb?.webSearches ?: JSONObject.NULL)
         entry.put("usage", usage)
-        // Token cost only. Web search is billed per search at a rate not folded
-        // in here; web_searches above is what reconstructs the real figure.
+        // Priced by the vendor rather than from a hardcoded rate card, which
+        // would go stale and differs per rung. Null when the vendor does not say.
         entry.put("cost_usd", blurb?.costUsd ?: JSONObject.NULL)
 
         val timings = JSONObject()

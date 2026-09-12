@@ -3,6 +3,8 @@ package ai.voitta.virgil
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -20,7 +22,6 @@ data class Retrieval(
 sealed interface UiState {
     data object Idle : UiState
     data object Locating : UiState
-    data object Resolving : UiState
     data object Retrieving : UiState
     data class Narrating(val retrieval: Retrieval) : UiState
     data class Ready(
@@ -37,15 +38,43 @@ class VirgilViewModel(application: Application) : AndroidViewModel(application) 
     private val mutableState = MutableStateFlow<UiState>(UiState.Idle)
     val state: StateFlow<UiState> = mutableState.asStateFlow()
 
-    private val mutableHasKey = MutableStateFlow(ApiKeyStore.get(application) != null)
-    val hasKey: StateFlow<Boolean> = mutableHasKey.asStateFlow()
+    private val mutableEnabled = MutableStateFlow(
+        Providers.enabled(application).map { vendor -> vendor.name }
+    )
+    val enabledProviders: StateFlow<List<String>> = mutableEnabled.asStateFlow()
+
+    private val mutableMissingKeys = MutableStateFlow(vendorsWithoutKeys())
+    val missingKeys: StateFlow<List<Vendor>> = mutableMissingKeys.asStateFlow()
+
+    private val mutableWarning = MutableStateFlow(waterfallWarning(application))
+    val warning: StateFlow<String?> = mutableWarning.asStateFlow()
 
     private val mutableLogCount = MutableStateFlow(EvalLog.entryCount(application))
     val logCount: StateFlow<Int> = mutableLogCount.asStateFlow()
 
-    fun saveApiKey(value: String) {
-        ApiKeyStore.set(getApplication(), value)
-        mutableHasKey.value = ApiKeyStore.get(getApplication<Application>()) != null
+    private fun vendorsWithoutKeys(): List<Vendor> {
+        val context = getApplication<Application>()
+        val retval = Providers.enabled(context)
+            .filter { vendor -> ApiKeyStore.get(context, vendor.name) == null }
+        return retval
+    }
+
+    fun setProviderEnabled(name: String, on: Boolean) {
+        val context = getApplication<Application>()
+        Providers.setEnabled(context, name, on)
+        mutableEnabled.value = Providers.enabled(context).map { vendor -> vendor.name }
+        mutableMissingKeys.value = vendorsWithoutKeys()
+        mutableWarning.value = waterfallWarning(context)
+    }
+
+    fun saveApiKey(vendor: String, value: String) {
+        val context = getApplication<Application>()
+        ApiKeyStore.set(context, vendor, value)
+        // A freshly supplied key deserves an immediate try, not the tail of an
+        // old park window.
+        VendorParking.clear(context, vendor)
+        mutableMissingKeys.value = vendorsWithoutKeys()
+        mutableWarning.value = waterfallWarning(context)
     }
 
     fun whereAmI() {
@@ -69,49 +98,49 @@ class VirgilViewModel(application: Application) : AndroidViewModel(application) 
             }
             val fixedAt = System.currentTimeMillis()
 
-            mutableState.value = UiState.Resolving
+            mutableState.value = UiState.Retrieving
 
-            val place = try {
-                reverseGeocode(fix.lat, fix.lon)
+            // Both lookups hit different hosts and neither needs the other's
+            // answer, so they run together. Serially they were the single
+            // largest slice of wall clock.
+            val gathered = try {
+                coroutineScope {
+                    val geocode = async { reverseGeocode(fix.lat, fix.lon) }
+                    val articles = async {
+                        try {
+                            Pair(nearbyArticles(fix.lat, fix.lon), null as String?)
+                        } catch (e: LookupFailed) {
+                            // Not fatal: narration has the web, and an empty
+                            // candidate set is a normal result anyway.
+                            Pair(emptyList<WikiCandidate>(), e.message)
+                        }
+                    }
+                    Pair(geocode.await(), articles.await())
+                }
             } catch (e: LookupFailed) {
                 mutableState.value = UiState.Failed(e.message ?: "Address lookup failed.")
                 return@launch
-            }
-
-            mutableState.value = UiState.Retrieving
-
-            // An article lookup failure is not fatal. Narration has web search and
-            // an empty candidate set is a normal result anyway.
-            var candidates = emptyList<WikiCandidate>()
-            var candidatesError: String? = null
-            try {
-                candidates = nearbyArticles(fix.lat, fix.lon)
-            } catch (e: LookupFailed) {
-                candidatesError = e.message
             }
             val retrievedAt = System.currentTimeMillis()
 
             val retrieval = Retrieval(
                 fix = fix,
-                place = place,
-                candidates = candidates,
-                candidatesError = candidatesError,
+                place = gathered.first,
+                candidates = gathered.second.first,
+                candidatesError = gathered.second.second,
             )
 
             mutableState.value = UiState.Narrating(retrieval)
 
-            val apiKey = ApiKeyStore.get(context)
             var blurb: Blurb? = null
             var blurbError: String? = null
-
-            if (apiKey == null) {
-                blurbError = "No API key set."
-            } else {
-                try {
-                    blurb = narrate(apiKey, retrieval)
-                } catch (e: NarrationFailed) {
-                    blurbError = e.message ?: "Narration failed."
-                }
+            var attempts = emptyList<VendorAttempt>()
+            try {
+                blurb = narrate(context, retrieval)
+                attempts = blurb.attempts
+            } catch (e: NarrationFailed) {
+                blurbError = e.message ?: "Narration failed."
+                attempts = e.attempts
             }
             val narratedAt = System.currentTimeMillis()
 
@@ -122,8 +151,12 @@ class VirgilViewModel(application: Application) : AndroidViewModel(application) 
                 totalMs = narratedAt - startedAt,
             )
 
-            EvalLog.append(context, EvalLog.buildEntry(retrieval, blurb, blurbError, latency))
+            EvalLog.append(
+                context,
+                EvalLog.buildEntry(retrieval, blurb, blurbError, latency, attempts),
+            )
             mutableLogCount.value = EvalLog.entryCount(context)
+            mutableWarning.value = waterfallWarning(context)
 
             mutableState.value = UiState.Ready(
                 retrieval = retrieval,
