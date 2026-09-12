@@ -69,4 +69,8 @@ dependencies {
     // imported directly by Places.kt/VirgilViewModel.kt, so declared rather than
     // relied on transitively through lifecycle
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    implementation("androidx.core:core-ktx:1.13.1")
+    // verified on device under R8 in issue #4; see proguard-rules.pro
+    implementation("com.anthropic:anthropic-java:2.34.0")
 }

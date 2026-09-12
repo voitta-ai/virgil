@@ -2,32 +2,47 @@ package ai.voitta.virgil
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import java.util.Locale
 
@@ -53,6 +68,8 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun VirgilScreen(viewModel: VirgilViewModel = viewModel()) {
     val state by viewModel.state.collectAsState()
+    val hasKey by viewModel.hasKey.collectAsState()
+    val logCount by viewModel.logCount.collectAsState()
     val context = LocalContext.current
 
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -66,18 +83,27 @@ private fun VirgilScreen(viewModel: VirgilViewModel = viewModel()) {
         }
     }
 
-    val busy = state is UiState.Locating || state is UiState.Resolving
+    val busy = state is UiState.Locating ||
+        state is UiState.Resolving ||
+        state is UiState.Retrieving ||
+        state is UiState.Narrating
 
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Top,
     ) {
         Text("Virgil", style = MaterialTheme.typography.headlineMedium)
 
-        Spacer(Modifier.height(32.dp))
+        Spacer(Modifier.height(16.dp))
+
+        if (!hasKey) {
+            ApiKeyEntry(onSave = { value -> viewModel.saveApiKey(value) })
+            Spacer(Modifier.height(16.dp))
+        }
 
         Button(
             onClick = {
@@ -92,7 +118,7 @@ private fun VirgilScreen(viewModel: VirgilViewModel = viewModel()) {
             Text("Where am I?")
         }
 
-        Spacer(Modifier.height(32.dp))
+        Spacer(Modifier.height(20.dp))
 
         when (val current = state) {
             is UiState.Idle -> Unit
@@ -101,7 +127,14 @@ private fun VirgilScreen(viewModel: VirgilViewModel = viewModel()) {
 
             is UiState.Resolving -> Progress("Looking up the address...")
 
-            is UiState.Ready -> Located(current)
+            is UiState.Retrieving -> Progress("Looking for anything nearby...")
+
+            is UiState.Narrating -> Progress("Working out what to tell you...")
+
+            is UiState.Ready -> Result(
+                ready = current,
+                onRate = { rating -> viewModel.rate(rating) },
+            )
 
             is UiState.Failed -> Text(
                 text = current.message,
@@ -109,6 +142,43 @@ private fun VirgilScreen(viewModel: VirgilViewModel = viewModel()) {
                 color = MaterialTheme.colorScheme.error,
                 textAlign = TextAlign.Center,
             )
+        }
+
+        if (logCount > 0) {
+            Spacer(Modifier.height(32.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(8.dp))
+            TextButton(onClick = { exportLog(context) }) {
+                Text("Export log ($logCount)")
+            }
+        }
+    }
+}
+
+@Composable
+private fun ApiKeyEntry(onSave: (String) -> Unit) {
+    var value by remember { mutableStateOf("") }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            "Virgil calls the Anthropic API with your own key.",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Spacer(Modifier.height(8.dp))
+        OutlinedTextField(
+            value = value,
+            onValueChange = { entered -> value = entered },
+            label = { Text("Anthropic API key") },
+            singleLine = true,
+            visualTransformation = PasswordVisualTransformation(),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(
+            onClick = { onSave(value) },
+            enabled = value.isNotBlank(),
+        ) {
+            Text("Save key")
         }
     }
 }
@@ -123,39 +193,156 @@ private fun Progress(label: String) {
 }
 
 @Composable
-private fun Located(ready: UiState.Ready) {
-    val place = ready.place
-    val fix = ready.fix
-
+private fun Result(ready: UiState.Ready, onRate: (String) -> Unit) {
     Column(modifier = Modifier.fillMaxWidth()) {
-        val headline = place.street ?: place.neighbourhood ?: place.city ?: "Unnamed place"
-        Text(headline, style = MaterialTheme.typography.titleLarge)
 
-        Spacer(Modifier.height(4.dp))
-
-        val region = listOfNotNull(place.city, place.state, place.postcode).joinToString(", ")
-        if (region.isNotEmpty()) {
-            Text(region, style = MaterialTheme.typography.bodyLarge)
+        val blurb = ready.blurb
+        if (blurb != null) {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    blurb.text,
+                    style = MaterialTheme.typography.bodyLarge,
+                    modifier = Modifier.padding(16.dp),
+                )
+            }
+            Spacer(Modifier.height(12.dp))
+            RatingRow(rating = ready.rating, onRate = onRate)
+            Spacer(Modifier.height(12.dp))
+            Text(costLine(blurb), style = MaterialTheme.typography.bodySmall)
         }
 
-        Spacer(Modifier.height(16.dp))
-
-        Text(coordinateLine(fix), style = MaterialTheme.typography.bodySmall)
-
-        if (fix.stale) {
-            Spacer(Modifier.height(4.dp))
+        val blurbError = ready.blurbError
+        if (blurbError != null) {
             Text(
-                "Last known location, not a fresh fix.",
-                style = MaterialTheme.typography.bodySmall,
+                blurbError,
+                style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.error,
             )
         }
 
-        if (place.displayName.isNotEmpty()) {
-            Spacer(Modifier.height(16.dp))
-            Text(place.displayName, style = MaterialTheme.typography.bodySmall)
+        Spacer(Modifier.height(20.dp))
+        WhatItUsed(ready.retrieval)
+    }
+}
+
+@Composable
+private fun RatingRow(rating: String?, onRate: (String) -> Unit) {
+    if (rating != null) {
+        Text("Rated: $rating", style = MaterialTheme.typography.bodyMedium)
+        return
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        for (option in listOf("interesting", "meh", "wrong")) {
+            OutlinedButton(onClick = { onRate(option) }) {
+                Text(option)
+            }
         }
     }
+}
+
+/**
+ * Required for judging hallucination: the blurb cannot be assessed without
+ * seeing what the model was actually given.
+ */
+@Composable
+private fun WhatItUsed(retrieval: Retrieval) {
+    var expanded by remember { mutableStateOf(false) }
+
+    val label = if (expanded) "hide what it used" else "what it used (${retrieval.candidates.size})"
+    Text(
+        label,
+        style = MaterialTheme.typography.labelLarge,
+        modifier = Modifier.clickable { expanded = !expanded },
+    )
+
+    if (!expanded) {
+        return
+    }
+
+    Spacer(Modifier.height(12.dp))
+
+    val place = retrieval.place
+    val fix = retrieval.fix
+
+    val headline = place.street ?: place.neighbourhood ?: place.city ?: "Unnamed place"
+    Text(headline, style = MaterialTheme.typography.titleMedium)
+    val region = listOfNotNull(place.city, place.state, place.postcode).joinToString(", ")
+    if (region.isNotEmpty()) {
+        Text(region, style = MaterialTheme.typography.bodyMedium)
+    }
+    Text(coordinateLine(fix), style = MaterialTheme.typography.bodySmall)
+    if (fix.stale) {
+        Text(
+            "Last known location, not a fresh fix.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+        )
+    }
+
+    Spacer(Modifier.height(12.dp))
+
+    val candidatesError = retrieval.candidatesError
+    if (candidatesError != null) {
+        Text(
+            candidatesError,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.error,
+        )
+        return
+    }
+
+    if (retrieval.candidates.isEmpty()) {
+        Text("Nothing within 10 km.", style = MaterialTheme.typography.bodyMedium)
+        return
+    }
+
+    for (candidate in retrieval.candidates) {
+        Text(
+            "${candidate.title}  -  ${distanceLabel(candidate.distanceM)}",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        val intro = candidate.intro
+        if (intro != null) {
+            Text(intro.take(200), style = MaterialTheme.typography.bodySmall)
+        }
+        Spacer(Modifier.height(8.dp))
+    }
+}
+
+private fun exportLog(context: Context) {
+    val file = EvalLog.file(context)
+    if (!file.exists()) {
+        return
+    }
+    val uri = FileProvider.getUriForFile(context, "${context.packageName}.logs", file)
+    val intent = Intent(Intent.ACTION_SEND)
+    intent.type = "application/json"
+    intent.putExtra(Intent.EXTRA_STREAM, uri)
+    intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    context.startActivity(Intent.createChooser(intent, "Export evaluation log"))
+}
+
+private fun costLine(blurb: Blurb): String {
+    val retval = String.format(
+        Locale.US,
+        "%d in / %d out tokens, %d web searches, $%.4f",
+        blurb.inputTokens,
+        blurb.outputTokens,
+        blurb.webSearches,
+        blurb.costUsd,
+    )
+    return retval
+}
+
+private fun distanceLabel(metres: Double): String {
+    val retval = if (metres.isNaN()) {
+        "distance unknown"
+    } else if (metres < 1000) {
+        String.format(Locale.US, "%.0f m", metres)
+    } else {
+        String.format(Locale.US, "%.1f km", metres / 1000)
+    }
+    return retval
 }
 
 private fun coordinateLine(fix: Fix): String {

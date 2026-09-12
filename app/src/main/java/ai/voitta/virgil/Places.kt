@@ -11,8 +11,6 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
-import java.io.IOException
-import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.coroutines.resume
 
@@ -34,6 +32,7 @@ data class Place(
     val county: String?,
     val state: String?,
     val postcode: String?,
+    val countryCode: String?,
 ) {
     /** House number and road, when both are known. */
     val street: String?
@@ -47,12 +46,7 @@ data class Place(
         }
 }
 
-class LookupFailed(message: String) : Exception(message)
-
 private const val FIX_TIMEOUT_MS = 15_000L
-
-// Nominatim's usage policy requires a User-Agent identifying the application.
-private const val USER_AGENT = "Virgil/0.1 (+https://github.com/voitta-ai/virgil)"
 
 /**
  * A current fix, or the last known one marked stale, or null if neither is
@@ -101,33 +95,11 @@ suspend fun reverseGeocode(lat: Double, lon: Double): Place {
             "https://nominatim.openstreetmap.org/reverse" +
                 "?format=jsonv2&lat=$lat&lon=$lon&zoom=18&addressdetails=1"
         )
-        val body = fetch(url)
+        val body = fetch(url, "Address lookup")
         val parsed = parsePlace(body)
         parsed
     }
     return retval
-}
-
-private fun fetch(url: URL): String {
-    val connection = url.openConnection() as HttpURLConnection
-    try {
-        connection.requestMethod = "GET"
-        connection.setRequestProperty("User-Agent", USER_AGENT)
-        connection.setRequestProperty("Accept", "application/json")
-        connection.connectTimeout = 10_000
-        connection.readTimeout = 10_000
-
-        val code = connection.responseCode
-        if (code != HttpURLConnection.HTTP_OK) {
-            throw LookupFailed("Address lookup returned HTTP $code.")
-        }
-        val retval = connection.inputStream.bufferedReader().use { it.readText() }
-        return retval
-    } catch (e: IOException) {
-        throw LookupFailed("Address lookup could not reach the network.")
-    } finally {
-        connection.disconnect()
-    }
 }
 
 private fun parsePlace(body: String): Place {
@@ -145,6 +117,7 @@ private fun parsePlace(body: String): Place {
         county = address?.stringOrNull("county"),
         state = address?.stringOrNull("state"),
         postcode = address?.stringOrNull("postcode"),
+        countryCode = address?.stringOrNull("country_code"),
     )
     return retval
 }
