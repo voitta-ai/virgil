@@ -128,6 +128,7 @@ object EvalLog {
         }
         entry.put("vendor_attempts", walk)
         entry.put("blurb", blurb?.text ?: JSONObject.NULL)
+        entry.put("finish_reason", blurb?.finishReason ?: JSONObject.NULL)
         entry.put("blurb_error", blurbError ?: JSONObject.NULL)
 
         val usage = JSONObject()

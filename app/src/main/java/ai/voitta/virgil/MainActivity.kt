@@ -111,7 +111,7 @@ private fun VirgilScreen(viewModel: VirgilViewModel = viewModel()) {
         for (vendor in missingKeys) {
             ApiKeyEntry(
                 vendor = vendor,
-                onSave = { value -> viewModel.saveApiKey(vendor.name, value) },
+                onSave = { value -> viewModel.saveApiKey(vendor.credential, value) },
             )
             Spacer(Modifier.height(16.dp))
         }
@@ -228,14 +228,14 @@ private fun ApiKeyEntry(vendor: Vendor, onSave: (String) -> Unit) {
 
     Column(modifier = Modifier.fillMaxWidth()) {
         Text(
-            "Virgil calls ${vendor.name} with your own key.",
+            "Virgil calls ${vendor.credential} with your own key.",
             style = MaterialTheme.typography.bodyMedium,
         )
         Spacer(Modifier.height(8.dp))
         OutlinedTextField(
             value = value,
             onValueChange = { entered -> value = entered },
-            label = { Text("${vendor.name} API key") },
+            label = { Text("${vendor.credential} API key") },
             singleLine = true,
             visualTransformation = PasswordVisualTransformation(),
             modifier = Modifier.fillMaxWidth(),

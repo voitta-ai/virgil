@@ -41,14 +41,29 @@ fun fetch(url: URL, what: String): String {
     }
 }
 
+/** How a vendor wants its credential presented. */
+enum class AuthHeader {
+    BEARER,
+    GOOG_API_KEY,
+}
+
 /** POST JSON and return the response body. Throws [HttpFailure] on non-2xx. */
-fun postJson(url: URL, bearerToken: String, body: String, timeoutMs: Int): String {
+fun postJson(
+    url: URL,
+    auth: AuthHeader,
+    credential: String,
+    body: String,
+    timeoutMs: Int,
+): String {
     val connection = url.openConnection() as HttpURLConnection
     try {
         connection.requestMethod = "POST"
         connection.doOutput = true
         connection.setRequestProperty("User-Agent", USER_AGENT)
-        connection.setRequestProperty("Authorization", "Bearer $bearerToken")
+        when (auth) {
+            AuthHeader.BEARER -> connection.setRequestProperty("Authorization", "Bearer $credential")
+            AuthHeader.GOOG_API_KEY -> connection.setRequestProperty("x-goog-api-key", credential)
+        }
         connection.setRequestProperty("Content-Type", "application/json")
         connection.setRequestProperty("Accept", "application/json")
         // OpenRouter attributes traffic with these; harmless elsewhere.

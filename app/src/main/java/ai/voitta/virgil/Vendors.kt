@@ -3,6 +3,26 @@ package ai.voitta.virgil
 import android.content.Context
 
 /**
+ * How a rung is spoken to.
+ *
+ * The waterfall's claim is that rungs can serve the same request, not that they
+ * share one JSON shape. Two protocols with an adapter each is honest; what is
+ * not allowed is a vendor-specific field smuggled into a shared body.
+ */
+enum class Protocol {
+    /** POST {baseUrl}/chat/completions, OpenAI shaped. */
+    OPENAI_COMPAT,
+
+    /**
+     * POST {baseUrl}/models/{model}:generateContent, Google shaped.
+     *
+     * Exists solely because Google's own OpenAI-compatible layer rejects
+     * google_search grounding, and grounding is what carries Tier 1.
+     */
+    GEMINI_NATIVE,
+}
+
+/**
  * One rung of the waterfall.
  *
  * Every rung speaks the OpenAI-compatible chat/completions wire format, which
@@ -12,6 +32,13 @@ data class Vendor(
     val name: String,
     val baseUrl: String,
     val model: String,
+    val protocol: Protocol = Protocol.OPENAI_COMPAT,
+    /**
+     * Which stored credential this rung uses. Defaults to the vendor's own
+     * name; two rungs that are the same account behind different protocols
+     * share one, so the user is not asked for the same key twice.
+     */
+    val keyName: String? = null,
     /**
      * Whether this rung can search the web.
      *
@@ -31,7 +58,14 @@ data class Vendor(
      * Vendor-specific extras belong on the vendor, never in the shared body.
      */
     val costReporting: Boolean = false,
-)
+) {
+    /** The stored credential this rung uses. */
+    val credential: String
+        get() {
+            val retval = keyName ?: name
+            return retval
+        }
+}
 
 /**
  * Providers the user can choose from. Nothing here is enabled by default and no
@@ -52,13 +86,23 @@ val PROVIDER_CATALOG = listOf(
         costReporting = true,
     ),
     Vendor(
-        // Google's OpenAI-compatible endpoint. Verified live. Note webSearch is
-        // false: that layer accepts only OpenAI-shaped tools, so Gemini's
-        // google_search grounding is rejected there ("Unknown name
-        // \"google_search\" at 'tools[0]'"). Fine for text, cannot carry Tier 1.
+        // Google's native endpoint, which does support google_search grounding.
+        // Verified live: it issues real queries and returns sources.
         name = "gemini",
+        baseUrl = "https://generativelanguage.googleapis.com/v1beta",
+        model = "gemini-3.8-flash",
+        protocol = Protocol.GEMINI_NATIVE,
+        webSearch = true,
+    ),
+    Vendor(
+        // The same key against Google's OpenAI-compatible layer. Kept as a
+        // fallback rung because that layer accepts only OpenAI-shaped tools and
+        // so rejects grounding ("Unknown name \"google_search\" at 'tools[0]'").
+        // Fine for text; cannot carry Tier 1.
+        name = "gemini-compat",
         baseUrl = "https://generativelanguage.googleapis.com/v1beta/openai",
         model = "gemini-3.8-flash",
+        keyName = "gemini",
         webSearch = false,
     ),
     Vendor(
@@ -121,11 +165,11 @@ object Providers {
  */
 fun waterfallWarning(context: Context): String? {
     val chain = Providers.enabled(context)
-    val keyless = chain.filter { vendor -> ApiKeyStore.get(context, vendor.name) == null }
+    val keyless = chain.filter { vendor -> ApiKeyStore.get(context, vendor.credential) == null }
     val retval = when {
         chain.isEmpty() -> "No providers chosen. Pick at least one below."
         keyless.isNotEmpty() ->
-            "No key for: ${keyless.joinToString(", ") { vendor -> vendor.name }}. " +
+            "No key for: ${keyless.map { vendor -> vendor.credential }.distinct().joinToString(", ")}. " +
                 "Those rungs can never serve."
         chain.size == 1 -> "One provider, so there is no failover."
         else -> null

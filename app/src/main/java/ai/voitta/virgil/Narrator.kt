@@ -15,6 +15,8 @@ data class Blurb(
     val model: String,
     /** False means this run did not have web search at all. See [Vendor.webSearch]. */
     val webSearchAvailable: Boolean,
+    /** The vendor's stop reason. A clipped blurb is otherwise a mystery. */
+    val finishReason: String?,
     val inputTokens: Long,
     val outputTokens: Long,
     /** Reported by the vendor when it can; null when it does not say. */
@@ -100,7 +102,7 @@ suspend fun narrate(context: Context, retrieval: Retrieval): Blurb {
         val attempts = mutableListOf<VendorAttempt>()
 
         for (vendor in chain) {
-            val apiKey = ApiKeyStore.get(context, vendor.name)
+            val apiKey = ApiKeyStore.get(context, vendor.credential)
             if (apiKey == null) {
                 attempts.add(VendorAttempt(vendor.name, "no key"))
                 continue
@@ -141,18 +143,35 @@ private fun callVendor(
     retrieval: Retrieval,
     attempts: MutableList<VendorAttempt>,
 ): Blurb {
+    // A rung without web search must not be told to search: that instruction is
+    // an invitation to invent, which is the one unrecoverable failure.
+    val searchClause = if (vendor.webSearch) WEB_SEARCH_CLAUSE else NO_WEB_SEARCH_CLAUSE
+    val systemPrompt = SYSTEM_PROMPT.trim() + "\n\n" + searchClause.trim()
+    val userPrompt = describe(retrieval)
+
+    val retval = when (vendor.protocol) {
+        Protocol.OPENAI_COMPAT ->
+            callOpenAiCompatible(vendor, apiKey, systemPrompt, userPrompt, attempts)
+        Protocol.GEMINI_NATIVE ->
+            callGeminiNative(vendor, apiKey, systemPrompt, userPrompt, attempts)
+    }
+    return retval
+}
+
+private fun callOpenAiCompatible(
+    vendor: Vendor,
+    apiKey: String,
+    systemPrompt: String,
+    userPrompt: String,
+    attempts: MutableList<VendorAttempt>,
+): Blurb {
     val body = JSONObject()
     body.put("model", vendor.model)
     body.put("max_tokens", MAX_TOKENS)
 
-    // A rung without web search must not be told to search: that instruction
-    // is an invitation to invent, which is the one unrecoverable failure.
-    val searchClause = if (vendor.webSearch) WEB_SEARCH_CLAUSE else NO_WEB_SEARCH_CLAUSE
-    val system = SYSTEM_PROMPT.trim() + "\n\n" + searchClause.trim()
-
     val messages = JSONArray()
-    messages.put(JSONObject().put("role", "system").put("content", system))
-    messages.put(JSONObject().put("role", "user").put("content", describe(retrieval)))
+    messages.put(JSONObject().put("role", "system").put("content", systemPrompt))
+    messages.put(JSONObject().put("role", "user").put("content", userPrompt))
     body.put("messages", messages)
 
     if (vendor.webSearch) {
@@ -167,7 +186,7 @@ private fun callVendor(
     }
 
     val url = URL("${vendor.baseUrl}/chat/completions")
-    val response = postJson(url, apiKey, body.toString(), REQUEST_TIMEOUT_MS)
+    val response = postJson(url, AuthHeader.BEARER, apiKey, body.toString(), REQUEST_TIMEOUT_MS)
 
     val root = JSONObject(response)
     val message = root.optJSONArray("choices")
@@ -182,6 +201,7 @@ private fun callVendor(
         throw NarrationFailed("Virgil had nothing to say (finish_reason: $finish).")
     }
 
+    val finish = root.optJSONArray("choices")?.optJSONObject(0)?.optString("finish_reason", null)
     val usage = root.optJSONObject("usage")
     val cost = if (usage != null && usage.has("cost") && !usage.isNull("cost")) {
         usage.optDouble("cost")
@@ -194,11 +214,107 @@ private fun callVendor(
         vendor = vendor.name,
         model = vendor.model,
         webSearchAvailable = vendor.webSearch,
+        finishReason = finish,
         inputTokens = usage?.optLong("prompt_tokens", 0L) ?: 0L,
         outputTokens = usage?.optLong("completion_tokens", 0L) ?: 0L,
         costUsd = cost,
         attempts = attempts.toList(),
     )
+    return retval
+}
+
+/**
+ * Google's native endpoint.
+ *
+ * Exists only because Google's OpenAI-compatible layer rejects google_search
+ * grounding, and grounding is what carries the boring-neighbourhood case.
+ */
+private fun callGeminiNative(
+    vendor: Vendor,
+    apiKey: String,
+    systemPrompt: String,
+    userPrompt: String,
+    attempts: MutableList<VendorAttempt>,
+): Blurb {
+    val body = JSONObject()
+
+    body.put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", systemPrompt))))
+    body.put(
+        "contents",
+        JSONArray().put(
+            JSONObject()
+                .put("role", "user")
+                .put("parts", JSONArray().put(JSONObject().put("text", userPrompt)))
+        )
+    )
+    if (vendor.webSearch) {
+        body.put("tools", JSONArray().put(JSONObject().put("google_search", JSONObject())))
+    }
+    body.put("generationConfig", JSONObject().put("maxOutputTokens", MAX_TOKENS))
+
+    val url = URL("${vendor.baseUrl}/models/${vendor.model}:generateContent")
+    val response = postJson(url, AuthHeader.GOOG_API_KEY, apiKey, body.toString(), REQUEST_TIMEOUT_MS)
+
+    val root = JSONObject(response)
+    val candidate = root.optJSONArray("candidates")?.optJSONObject(0)
+    val parts = candidate?.optJSONObject("content")?.optJSONArray("parts")
+
+    val text = StringBuilder()
+    if (parts != null) {
+        for (index in 0 until parts.length()) {
+            val part = parts.optJSONObject(index) ?: continue
+            // Grounded answers interleave non-text parts; take only the prose.
+            if (part.has("text")) {
+                text.append(part.optString("text"))
+            }
+        }
+    }
+    val blurbText = stripCitationMarkers(text.toString()).trim()
+
+    if (blurbText.isEmpty()) {
+        val finish = candidate?.optString("finishReason", "unknown") ?: "unknown"
+        throw NarrationFailed("Virgil had nothing to say (finishReason: $finish).")
+    }
+
+    val usage = root.optJSONObject("usageMetadata")
+    // thoughtsTokenCount is billed as output but counted separately, so it has
+    // to be added back or the figure understates what the call cost.
+    val output = (usage?.optLong("candidatesTokenCount", 0L) ?: 0L) +
+        (usage?.optLong("thoughtsTokenCount", 0L) ?: 0L)
+
+    val retval = Blurb(
+        text = blurbText,
+        vendor = vendor.name,
+        model = vendor.model,
+        webSearchAvailable = vendor.webSearch,
+        finishReason = candidate?.optString("finishReason", null),
+        inputTokens = usage?.optLong("promptTokenCount", 0L) ?: 0L,
+        outputTokens = output,
+        costUsd = null,
+        attempts = attempts.toList(),
+    )
+    return retval
+}
+
+/**
+ * Grounded answers carry inline citation markers such as `[1.4.7]`, which the
+ * prompt asks against but does not reliably prevent. They must go: this text is
+ * read aloud, and a marker becomes "one point four point seven".
+ *
+ * Only digit-and-separator brackets are stripped, so ordinary bracketed prose
+ * survives.
+ */
+private val CITATION_MARKER = Regex("\\s*\\[[0-9\\s.,;-]+]")
+
+// A marker clipped by the end of the response leaves an unterminated "[1",
+// which the closed-bracket pattern above cannot match. Seen live.
+private val TRAILING_PARTIAL_MARKER = Regex("\\s*\\[[0-9\\s.,;-]*$")
+private val DOUBLED_SPACE = Regex("[ \\t]{2,}")
+
+private fun stripCitationMarkers(text: String): String {
+    val closed = CITATION_MARKER.replace(text, "")
+    val trimmed = TRAILING_PARTIAL_MARKER.replace(closed, "")
+    val retval = DOUBLED_SPACE.replace(trimmed, " ")
     return retval
 }
 

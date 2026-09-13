@@ -55,7 +55,8 @@ class VirgilViewModel(application: Application) : AndroidViewModel(application) 
     private fun vendorsWithoutKeys(): List<Vendor> {
         val context = getApplication<Application>()
         val retval = Providers.enabled(context)
-            .filter { vendor -> ApiKeyStore.get(context, vendor.name) == null }
+            .filter { vendor -> ApiKeyStore.get(context, vendor.credential) == null }
+            .distinctBy { vendor -> vendor.credential }
         return retval
     }
 
@@ -67,12 +68,14 @@ class VirgilViewModel(application: Application) : AndroidViewModel(application) 
         mutableWarning.value = waterfallWarning(context)
     }
 
-    fun saveApiKey(vendor: String, value: String) {
+    fun saveApiKey(credential: String, value: String) {
         val context = getApplication<Application>()
-        ApiKeyStore.set(context, vendor, value)
+        ApiKeyStore.set(context, credential, value)
         // A freshly supplied key deserves an immediate try, not the tail of an
-        // old park window.
-        VendorParking.clear(context, vendor)
+        // old park window -- on every rung that uses it.
+        PROVIDER_CATALOG
+            .filter { vendor -> vendor.credential == credential }
+            .forEach { vendor -> VendorParking.clear(context, vendor.name) }
         mutableMissingKeys.value = vendorsWithoutKeys()
         mutableWarning.value = waterfallWarning(context)
     }
