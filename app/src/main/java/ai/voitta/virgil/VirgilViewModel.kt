@@ -9,6 +9,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
 
 /** Everything the structured sources know about the point. */
 data class Retrieval(
@@ -51,6 +53,27 @@ class VirgilViewModel(application: Application) : AndroidViewModel(application) 
 
     private val mutableLogCount = MutableStateFlow(EvalLog.entryCount(application))
     val logCount: StateFlow<Int> = mutableLogCount.asStateFlow()
+
+    private val mutableSpeaking = MutableStateFlow(false)
+    val speaking: StateFlow<Boolean> = mutableSpeaking.asStateFlow()
+
+    /**
+     * The engine binds a service, so it is created once and released in
+     * onCleared. Its callbacks arrive on a binder thread; StateFlow tolerates
+     * that, and Compose collects on the main thread regardless.
+     */
+    private val speaker = Speaker(application) { speaking ->
+        mutableSpeaking.value = speaking
+    }
+
+    fun stopSpeaking() {
+        speaker.stop()
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        speaker.shutdown()
+    }
 
     private fun vendorsWithoutKeys(): List<Vendor> {
         val context = getApplication<Application>()
@@ -167,6 +190,16 @@ class VirgilViewModel(application: Application) : AndroidViewModel(application) 
                 blurbError = blurbError,
                 rating = null,
             )
+
+            // Delivery: spoken, and posted as a notification. The notification is
+            // redundant behind a button but is the primary surface once the
+            // trigger goes passive in v0.2.
+            if (blurb != null) {
+                speaker.speak(blurb.text)
+                withContext(Dispatchers.IO) {
+                    Notifier.post(context, blurb.text, retrieval.place)
+                }
+            }
         }
     }
 

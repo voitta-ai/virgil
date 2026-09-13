@@ -39,7 +39,7 @@ Three stages, on demand:
 2. **Narrate** - one model call turns the candidates into a blurb. Where the
    provider supports web search, that is what carries ordinary places, since
    geosearch returns nothing useful there.
-3. **Deliver** - on-screen text. Notification and speech are not built yet.
+3. **Deliver** - read aloud, posted as a notification, and shown on screen.
 
 Every run appends its inputs, output, cost, timings and your rating to a local
 JSONL log. **That log is the actual deliverable of v0.1** - the app is the
@@ -117,25 +117,41 @@ Android 8.0 (API 26) or newer.
    It should list your device as `device`. If it says `unauthorized`, look at
    the phone for the prompt in step 3.
 
+   **`adb: command not found`?** It ships with the SDK but is usually not on
+   your `PATH`. Either call it by full path or add it:
+
+   ```bash
+   export PATH="$PATH:/path/to/android/sdk/platform-tools"
+   ```
+
+   Same locations as above - e.g.
+   `/opt/homebrew/share/android-commandlinetools/platform-tools`,
+   `~/Library/Android/sdk/platform-tools`.
+
 5. **Install:**
 
    ```bash
    adb install -r app/build/outputs/apk/debug/app-debug.apk
    ```
 
-If you have no `adb`, copy the APK to the phone and open it - you will need to
-allow installation from unknown sources.
+If you have no `adb` at all, copy the APK to the phone and open it - you will
+need to allow installation from unknown sources.
 
 ## Using it
 
 1. Open Virgil. Under **Providers**, turn on the one you have a key for.
 2. Paste the API key and tap **Save key**.
-3. Tap **Where am I?** and grant location access when asked.
-4. Read the blurb, then rate it: *interesting*, *meh*, or *wrong*.
-5. Tap **what it used** to see exactly what the model was given. **Judge
+3. Tap **Where am I?**. Android asks for location: choose **Precise** and
+   **While using the app**. Approximate location is too coarse to say anything
+   about a particular street, which is the whole point.
+4. The blurb appears and is **read aloud**. Tap **Stop speaking** to cut it
+   short. After the first one, Android asks about notifications - optional, and
+   refusing costs only the notification.
+5. Rate it: *interesting*, *meh*, or *wrong*.
+6. Tap **what it used** to see exactly what the model was given. **Judge
    hallucination from here** - a blurb cannot be assessed without knowing what
    was retrieved.
-6. **Export log** shares the JSONL file. That file is what the experiment is
+7. **Export log** shares the JSONL file. That file is what the experiment is
    collecting.
 
 Rate honestly, including your own location. A blurb that is accurate but
@@ -144,11 +160,13 @@ is worth hearing, not whether it is true.
 
 ## Known gaps
 
-- Trigger is a button. Passive triggering is v0.2.
-- No notification, no speech yet.
-- Latency is 8-21 s end to end and the slowest runs still exceed the 20 s
-  target in [#2](https://github.com/voitta-ai/virgil/issues/2).
+- Trigger is a button. Passive triggering is v0.2, and the notification is
+  redundant until then.
+- Latency is 6-21 s end to end. The slowest runs still exceed the 20 s target
+  in [#2](https://github.com/voitta-ai/virgil/issues/2).
 - No tests, no CI. See [#5](https://github.com/voitta-ai/virgil/issues/5).
+
+Verified on a Pixel 10 Pro XL running Android 16, and on an API 31 emulator.
 
 ## License
 

@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -32,6 +33,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -52,6 +54,30 @@ private val LOCATION_PERMISSIONS = arrayOf(
     Manifest.permission.ACCESS_COARSE_LOCATION,
 )
 
+/**
+ * Asked for after the first blurb, not at launch.
+ *
+ * Prompting on launch asks the user to decide about notifications before they
+ * have seen what the app does, and a prompt that appears unbidden gets
+ * dismissed at random -- observed doing exactly that in testing. Never
+ * blocking: a refused notification costs the notification, not the blurb.
+ */
+@Composable
+private fun AskForNotifications(afterFirstBlurb: Boolean) {
+    val context = LocalContext.current
+    val launcher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { }
+    LaunchedEffect(afterFirstBlurb) {
+        if (afterFirstBlurb &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            !Notifier.allowed(context)
+        ) {
+            launcher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+}
+
 class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -71,6 +97,7 @@ private fun VirgilScreen(viewModel: VirgilViewModel = viewModel()) {
     val state by viewModel.state.collectAsState()
     val missingKeys by viewModel.missingKeys.collectAsState()
     val enabledProviders by viewModel.enabledProviders.collectAsState()
+    val speaking by viewModel.speaking.collectAsState()
     val warning by viewModel.warning.collectAsState()
     val logCount by viewModel.logCount.collectAsState()
     val context = LocalContext.current
@@ -89,6 +116,9 @@ private fun VirgilScreen(viewModel: VirgilViewModel = viewModel()) {
     val busy = state is UiState.Locating ||
         state is UiState.Retrieving ||
         state is UiState.Narrating
+
+    val delivered = state as? UiState.Ready
+    AskForNotifications(afterFirstBlurb = delivered?.blurb != null)
 
     Column(
         modifier = Modifier
@@ -153,6 +183,8 @@ private fun VirgilScreen(viewModel: VirgilViewModel = viewModel()) {
 
             is UiState.Ready -> Result(
                 ready = current,
+                speaking = speaking,
+                onStopSpeaking = { viewModel.stopSpeaking() },
                 onRate = { rating -> viewModel.rate(rating) },
             )
 
@@ -260,7 +292,12 @@ private fun Progress(label: String) {
 }
 
 @Composable
-private fun Result(ready: UiState.Ready, onRate: (String) -> Unit) {
+private fun Result(
+    ready: UiState.Ready,
+    speaking: Boolean,
+    onStopSpeaking: () -> Unit,
+    onRate: (String) -> Unit,
+) {
     Column(modifier = Modifier.fillMaxWidth()) {
 
         val blurb = ready.blurb
@@ -271,6 +308,12 @@ private fun Result(ready: UiState.Ready, onRate: (String) -> Unit) {
                     style = MaterialTheme.typography.bodyLarge,
                     modifier = Modifier.padding(16.dp),
                 )
+            }
+            if (speaking) {
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(onClick = onStopSpeaking) {
+                    Text("Stop speaking")
+                }
             }
             Spacer(Modifier.height(12.dp))
             RatingRow(rating = ready.rating, onRate = onRate)
