@@ -37,6 +37,20 @@ private const val MAX_TOKENS = 4000
 private const val MAX_WEB_RESULTS = 3
 private const val REQUEST_TIMEOUT_MS = 120_000
 
+/**
+ * Cap on Gemini's internal reasoning.
+ *
+ * Uncapped, thinking dominates the call and its tail is brutal: measured over
+ * five runs on the same Tier 1 prompt, median 27.7 s and a worst case of 41.8 s,
+ * against the p95 < 20 s target in issue #2. Capping at 2048 gives a median of
+ * 4.6 s while keeping roughly 70% of the checkable specifics.
+ *
+ * 2048 is the knee, not an arbitrary round number. 512 was also measured: it
+ * saves only another 0.7 s and drops specifics to about a quarter, which buys
+ * speed by giving up the thing grounding was added for.
+ */
+private const val THINKING_BUDGET = 2048
+
 /** How much of each article intro is worth sending. */
 private const val INTRO_BUDGET = 600
 
@@ -250,7 +264,12 @@ private fun callGeminiNative(
     if (vendor.webSearch) {
         body.put("tools", JSONArray().put(JSONObject().put("google_search", JSONObject())))
     }
-    body.put("generationConfig", JSONObject().put("maxOutputTokens", MAX_TOKENS))
+    body.put(
+        "generationConfig",
+        JSONObject()
+            .put("maxOutputTokens", MAX_TOKENS)
+            .put("thinkingConfig", JSONObject().put("thinkingBudget", THINKING_BUDGET))
+    )
 
     val url = URL("${vendor.baseUrl}/models/${vendor.model}:generateContent")
     val response = postJson(url, AuthHeader.GOOG_API_KEY, apiKey, body.toString(), REQUEST_TIMEOUT_MS)
