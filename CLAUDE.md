@@ -23,16 +23,19 @@ Two consequences that should shape most decisions here:
 
 ## Current state
 
-Build order from #3 is done through step 5. Working: location fix, reverse
-geocode, Wikipedia geosearch, narration through a provider waterfall, the
-evaluation log with ratings and export. Not built: notification, speech,
-passive triggering.
+Build order from #3 is done. Working: location fix, reverse geocode, Wikipedia
+geosearch, narration through a provider waterfall, speech, notification, and
+the evaluation log with ratings and export. Verified end to end on a Pixel 10
+Pro XL running Android 16 and on an API 31 emulator.
+
+Not built: passive triggering (v0.2), and CI (#5).
 
 ## Conventions
 
-- **Commit directly to `master` for now.** No branches, no PRs, no worktrees.
-  This flips once the app runs on real hardware; the first change through the
-  normal flow is #5 (CI/CD). This is deliberate, not an oversight.
+- **The next feature starts using branches, worktrees and PRs.** The gate was
+  "works on real hardware", and that is now met. Everything up to and including
+  step 6 landed directly on `master`, which was deliberate; from the next
+  feature onward, use the normal flow.
 - `minSdk 26` is **load-bearing**, not a default. It is exactly where
   `java.time` arrives, which is what let the JVM-shaped dependencies work
   without core library desugaring. Lowering it means turning desugaring on.
@@ -115,6 +118,13 @@ error messages that embed JSON.
   unterminated `[1` that a closed-bracket pattern will not match.
 - Streaming is **not** a latency fix. Thinking precedes any content token, so
   streaming cannot hide it.
+- Android 11 hides other packages unless queried. The `TTS_SERVICE` intent must
+  be declared in `<queries>` or no speech engine is visible at all.
+- Android 13's `POST_NOTIFICATIONS` is a runtime permission, and without it
+  `notify()` is **dropped silently** rather than throwing.
+- Ask for a permission when its value is apparent, not at launch. The
+  notification prompt originally fired on startup and was dismissed at random
+  by a tester who had not yet seen what the app does.
 - The five ProGuard rules that `com.anthropic:anthropic-java` needs under R8
   are recorded on #4. The SDK is no longer used, but do not re-derive them if
   it returns - the obvious broad Jackson keep rule makes things worse.
