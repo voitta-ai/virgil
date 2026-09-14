@@ -25,9 +25,23 @@ jobs:
         env:
           BASE: ${{ github.base_ref }}
         run: |
+          set -euo pipefail
           git fetch --no-tags --depth=1 origin "$BASE"
-          old=$(git show "FETCH_HEAD:$VERSION_FILE" | grep -oE 'versionName = "[^"]+"' | grep -oE '[0-9][^"]*')
           new=$(grep -oE 'versionName = "[^"]+"' "$VERSION_FILE" | grep -oE '[0-9][^"]*')
+          new_code=$(grep -oE 'versionCode = [0-9]+' "$VERSION_FILE" | grep -oE '[0-9]+')
+          # Bootstrap: base branch predates this version file entirely, e.g. the
+          # PR that first adds this workflow. Any version on the PR side passes.
+          if git cat-file -e "FETCH_HEAD:$VERSION_FILE" 2>/dev/null; then
+            old=$(git show "FETCH_HEAD:$VERSION_FILE" | grep -oE 'versionName = "[^"]+"' | grep -oE '[0-9][^"]*')
+            old_code=$(git show "FETCH_HEAD:$VERSION_FILE" | grep -oE 'versionCode = [0-9]+' | grep -oE '[0-9]+')
+          else
+            old=""
+            old_code=""
+          fi
+          if [ -z "$old" ]; then
+            echo "Bootstrap: no $VERSION_FILE on $BASE; accepting $new (versionCode $new_code)."
+            exit 0
+          fi
           if [ "$old" = "$new" ]; then
             echo "::error::$VERSION_FILE versionName is still $old - bump it."
             exit 1
@@ -36,7 +50,13 @@ jobs:
             echo "::error::$new does not advance past $old."
             exit 1
           fi
-          echo "$old -> $new"
+          # versionCode is the monotonic identifier Android distribution
+          # enforces; versionName advancing is not enough on its own.
+          if [ "$new_code" -le "$old_code" ]; then
+            echo "::error::versionCode must strictly increase ($old_code -> $new_code)."
+            exit 1
+          fi
+          echo "$old (code $old_code) -> $new (code $new_code)"
 
   tag-and-release:
     if: github.event_name == 'push'
@@ -51,6 +71,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           version=$(grep -oE 'versionName = "[^"]+"' "$VERSION_FILE" | grep -oE '[0-9][^"]*')
           if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
             echo "v$version is already tagged; nothing to release."
