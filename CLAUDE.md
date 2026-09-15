@@ -116,6 +116,11 @@ error messages that embed JSON.
   stripped: this text is meant to be spoken, where that becomes "one point
   four point seven". A marker clipped at the end of a response leaves an
   unterminated `[1` that a closed-bracket pattern will not match.
+- `TextToSpeech` has **no pause**. It has stop, and it has a queue. Pause is
+  therefore faked: the blurb is split into sentences and queued as separate
+  utterances, and resuming re-speaks from the interrupted one. A resume repeats
+  a sentence rather than continuing mid-word, and that is the ceiling, not a
+  bug. iOS `AVSpeechSynthesizer` has real pause and resume - see #7.
 - Streaming is **not** a latency fix. Thinking precedes any content token, so
   streaming cannot hide it.
 - Android 11 hides other packages unless queried. The `TTS_SERVICE` intent must
