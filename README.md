@@ -4,6 +4,18 @@ A guide. It checks where you are and tells you something about the place.
 
 Android first. Passive by design - you are not meant to talk to it.
 
+## Contents
+
+- [Status](#status)
+- [Requirements](#requirements)
+- [How it works](#how-it-works)
+- [Providers and keys](#providers-and-keys)
+- [Building](#building)
+- [Installing on a phone](#installing-on-a-phone)
+- [Using it](#using-it)
+- [Known gaps](#known-gaps)
+- [License](#license)
+
 ## Status
 
 v0.1 is an experiment, not a product. It exists to answer one question:
@@ -153,6 +165,9 @@ need to allow installation from unknown sources.
    was retrieved.
 7. **Export log** shares the JSONL file. That file is what the experiment is
    collecting.
+
+To do steps 1 and 2 from a computer over `adb` instead of on the phone, see
+[`.claude/skills/virgil-device-setup/SKILL.md`](.claude/skills/virgil-device-setup/SKILL.md).
 
 Rate honestly, including your own location. A blurb that is accurate but
 boring is *meh*, not *interesting* - the hypothesis is about whether the thing
