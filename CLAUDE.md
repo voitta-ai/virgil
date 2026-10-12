@@ -42,6 +42,9 @@ Not built: passive triggering (v0.2), and CI (#5).
 - **No secrets anywhere near the repo or the APK.** Keys are user-supplied at
   runtime and live only in `EncryptedSharedPreferences`. They are never
   logged, never written to the evaluation log, and never committed.
+- **Every procedure is documented twice**: for a human in `README.md` (which
+  keeps a table of contents), and for an agent as a skill under
+  `.claude/skills/`. Each links to the other, and a change to one updates both.
 - No tests exist yet and none are expected unless asked for.
 - Return a named variable rather than an expression, for easier debugging.
 - No Unicode emoji in code. Markdown is fine.
@@ -82,6 +85,9 @@ judging results.**
 
 There is no test suite. Verify on the emulator, and verify the **release**
 build, not just debug - R8 has broken things here before.
+
+To install and enter a provider key over adb, follow
+`.claude/skills/virgil-device-setup/SKILL.md`.
 
 ```bash
 ./gradlew assembleRelease
