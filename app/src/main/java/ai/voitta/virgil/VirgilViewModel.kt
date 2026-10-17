@@ -54,20 +54,29 @@ class VirgilViewModel(application: Application) : AndroidViewModel(application) 
     private val mutableLogCount = MutableStateFlow(EvalLog.entryCount(application))
     val logCount: StateFlow<Int> = mutableLogCount.asStateFlow()
 
-    private val mutableSpeaking = MutableStateFlow(false)
-    val speaking: StateFlow<Boolean> = mutableSpeaking.asStateFlow()
+    private val mutableSpeech = MutableStateFlow(SpeechState.IDLE)
+    val speech: StateFlow<SpeechState> = mutableSpeech.asStateFlow()
 
     /**
      * The engine binds a service, so it is created once and released in
      * onCleared. Its callbacks arrive on a binder thread; StateFlow tolerates
      * that, and Compose collects on the main thread regardless.
      */
-    private val speaker = Speaker(application) { speaking ->
-        mutableSpeaking.value = speaking
+    private val speaker = Speaker(application) { speechState ->
+        mutableSpeech.value = speechState
     }
 
     fun stopSpeaking() {
         speaker.stop()
+    }
+
+    /** Drives the one play/pause button: pauses if talking, plays if not. */
+    fun togglePlayback() {
+        if (mutableSpeech.value == SpeechState.SPEAKING) {
+            speaker.pause()
+        } else {
+            speaker.play()
+        }
     }
 
     override fun onCleared() {
@@ -107,6 +116,9 @@ class VirgilViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             val context = getApplication<Application>()
             val startedAt = System.currentTimeMillis()
+
+            // A blurb still being read belongs to the previous location.
+            speaker.stop()
 
             mutableState.value = UiState.Locating
 

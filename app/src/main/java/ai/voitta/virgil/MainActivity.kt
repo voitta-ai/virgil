@@ -97,7 +97,7 @@ private fun VirgilScreen(viewModel: VirgilViewModel = viewModel()) {
     val state by viewModel.state.collectAsState()
     val missingKeys by viewModel.missingKeys.collectAsState()
     val enabledProviders by viewModel.enabledProviders.collectAsState()
-    val speaking by viewModel.speaking.collectAsState()
+    val speech by viewModel.speech.collectAsState()
     val warning by viewModel.warning.collectAsState()
     val logCount by viewModel.logCount.collectAsState()
     val context = LocalContext.current
@@ -183,8 +183,9 @@ private fun VirgilScreen(viewModel: VirgilViewModel = viewModel()) {
 
             is UiState.Ready -> Result(
                 ready = current,
-                speaking = speaking,
-                onStopSpeaking = { viewModel.stopSpeaking() },
+                speech = speech,
+                onStop = { viewModel.stopSpeaking() },
+                onTogglePlayback = { viewModel.togglePlayback() },
                 onRate = { rating -> viewModel.rate(rating) },
             )
 
@@ -294,8 +295,9 @@ private fun Progress(label: String) {
 @Composable
 private fun Result(
     ready: UiState.Ready,
-    speaking: Boolean,
-    onStopSpeaking: () -> Unit,
+    speech: SpeechState,
+    onStop: () -> Unit,
+    onTogglePlayback: () -> Unit,
     onRate: (String) -> Unit,
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
@@ -309,10 +311,25 @@ private fun Result(
                     modifier = Modifier.padding(16.dp),
                 )
             }
-            if (speaking) {
-                Spacer(Modifier.height(8.dp))
-                OutlinedButton(onClick = onStopSpeaking) {
-                    Text("Stop speaking")
+            // Shown for as long as there is a blurb, not only while it is
+            // talking: after a stop, play is how you hear it again without
+            // spending another location fix and another narration.
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = onStop,
+                    enabled = speech != SpeechState.IDLE,
+                ) {
+                    Text("Stop")
+                }
+                OutlinedButton(onClick = onTogglePlayback) {
+                    Text(
+                        when (speech) {
+                            SpeechState.SPEAKING -> "Pause"
+                            SpeechState.PAUSED -> "Resume"
+                            SpeechState.IDLE -> "Play"
+                        }
+                    )
                 }
             }
             Spacer(Modifier.height(12.dp))
